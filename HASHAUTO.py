@@ -3,10 +3,10 @@ import os
 import re
 
 # --- Configuration ---
-HASHCAT_PATH = r"C:\Users\billo\OneDrive\Desktop\hashcat-6.2.6\hashcat.exe"
-HASHES_DIR = r"C:\Users\billo\OneDrive\Desktop\hashcat-6.2.6"  # Also SCP output
-WORDLIST = r"C:\Users\billo\OneDrive\Desktop\hashcat-6.2.6\test1.txt"
-OUTPUT_DIR = r"C:\Users\billo\OneDrive\Desktop\hashcat-6.2.6\OUTPUT"
+HASHCAT_PATH = r"C:\Users\EXAMPLE"
+HASHES_DIR = r"C:\Users\EXAMPLE"  # Also SCP output
+WORDLIST = r"C:\Users\EXAMPLE"
+OUTPUT_DIR = r"C:\Users\EXAMPLE"
 HASH_TYPE = "22000"
 ATTACK_MODE = "0"
 
@@ -48,7 +48,7 @@ for idx, hash_file in enumerate(hash_files, 1):
         "--outfile", output_file,
         "-D", "1,2",  # both gpu and cpu
         "-0",         # faster hardware optimized code paths on GPUs
-        "-r", r"C:\Users\billo\OneDrive\Desktop\hashcat-6.2.6\rules\d3ad0ne.rule"
+        "-r", r"C:\Users\EXAMPLE.RULE"
     ]
 
     process = subprocess.Popen(
