@@ -33,6 +33,8 @@ It avoids the 2000 character limit, provides information on what step it is on, 
 
 It utilizes perpletxity AI, or another AI via API key, to review answers it will provide and contextual information in conjunction with the LLM running on your GPUs.
 
+Currently, it utilizes 4-bit NF4 Quantization, however you are able to add in 8 bit modes, or even 16 bit modes.
+
 It has DuckDuckGo search integration, with SerpAPI fallback utilizing Google if DuckDuckGo cannot find anything. 
 
 You're able to adjust token limiations given the available hardware, for different thinking, fast, search, or ask modes. 
@@ -43,6 +45,9 @@ You're able to adjust token limiations given the available hardware, for differe
 !check <question> - Direct Perplexity API fact-checking and context<br>
 
 This script also has GPU out-of-memory recovery built in, including warnings and logging output, with automatic cleanup upon CTRL+C.
+
+
+
 
 
 Here is a .bat file to make execution a bit more easy:
