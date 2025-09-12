@@ -145,7 +145,7 @@ async def cached_ddg_search(query, max_results=5):
 async def web_search(query, max_results=3):
     """Legacy SerpAPI search - kept for fallback"""
     try:
-        SERPAPI_KEY = "1547c1a05bcbf634da52f5cb3cf45d81542a9fbe1cdf8a17285fff3c59a60c89"
+        SERPAPI_KEY = "API KEY"
         params = {
             "engine": "google",
             "q": query,
