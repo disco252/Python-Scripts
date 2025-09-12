@@ -77,3 +77,20 @@ python "PYTHON SCRIPT"
 
 REM 5. Pause to view any error messages
 pause
+
+
+=============================================================================================================================================================
+
+standalone.py is an offline version of discordllm.py, which utilizes no API keys, no internet access, but can utilize a "repo_chunk.json" which is contextualized, indexed information from technical documentation or other documentation you wish to provide, for scope. It also utilizes the same chat history from the other script above.
+
+!ask - Thinking mode with reasoning
+!fast - Quick mode optimized for speed
+!repo - Repository only search
+
+This script also provides about the same diagnostic information while the LLM is running. This one is great for large document/research paper analysis, multi-paragraph questions with detailed reasoning, not limited to Discord's message character limit, providing a great offline research and analysis local LLM. 
+
+
+
+=============================================================================================================================================================
+
+
