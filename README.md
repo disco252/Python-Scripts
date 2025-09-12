@@ -51,33 +51,40 @@ This script also has GPU out-of-memory recovery built in, including warnings and
 
 
 Here is a .bat file to make execution a bit more easy:
-
 @echo off
 REM ──────────────────────────────────────────────────────────────────────────────
-REM Batch script to activate environment and run Qwen3-14B Discord Bot
+REM High-Performance DeepSeek-R1 Discord Bot Launcher
 REM ──────────────────────────────────────────────────────────────────────────────
 
-REM 1. Change to the script’s directory
-cd /d "PYTHON SCRIPT"
+cd /d "E:\deepseek"
 
-REM 2. Activate your Python virtual environment (adjust path if needed)
-IF EXIST "venv\Scripts\activate.bat" (
-    echo Activating virtual environment...
-    call "venv\Scripts\activate.bat"
-) ELSE (
-    echo No virtual environment found. Ensure Python and dependencies are installed globally.
+REM Performance environment variables
+set MKL_NUM_THREADS=1
+set NUMBA_CACHE_DIR=E:\deepseek\.cache
+set TRANSFORMERS_CACHE=E:\deepseek\.cache\transformers
+set HF_HOME=E:\deepseek\.cache\huggingface
+
+REM Create optimized virtual environment
+if not exist venv (
+    echo Creating optimized virtual environment...
+    python -m venv venv --clear
+    call venv\Scripts\activate
+    python -m pip install --upgrade pip setuptools wheel
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    pip install transformers accelerate bitsandbytes discord.py duckduckgo-search requests psutil
+    echo ✅ Virtual environment created and dependencies installed
+) else (
+    call venv\Scripts\activate
 )
 
-REM 3. Set necessary environment variables
-set DISCORD_TOKEN=DISCORD TOKEN
+REM Set Discord token
+set DISCORD_TOKEN=YOUR TOKEN
 
-REM 4. Run the bot script
-echo Starting Qwen3-14B Discord Bot...
-python "PYTHON SCRIPT"
+REM Launch optimized bot
+echo 🚀 Starting high-performance DeepSeek-R1 bot...
+python bot.py
 
-REM 5. Pause to view any error messages
 pause
-
 
 =============================================================================================================================================================
 
