@@ -38,9 +38,9 @@ It has DuckDuckGo search integration, with SerpAPI fallback utilizing Google if 
 You're able to adjust token limiations given the available hardware, for different thinking, fast, search, or ask modes. 
 
 !ask <question> - Full reasoning mode with automatic web search when needed<br>
-!fast <question> - Quick responses without deep reasoningd<br>
-!search <question> - Force web search integration with detailed analysisd<br>
-!check <question> - Direct Perplexity API fact-checking and contextd<br>
+!fast <question> - Quick responses without deep reasoning<br>
+!search <question> - Force web search integration with detailed analysis<br>
+!check <question> - Direct Perplexity API fact-checking and context<br>
 
 This script also has GPU out-of-memory recovery built in, including warnings and logging output, with automatic cleanup upon CTRL+C.
 
