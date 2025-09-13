@@ -94,6 +94,7 @@ REM Set Discord token
 set DISCORD_TOKEN=YOUR TOKEN
 
 REM Launch enhanced bot
-echo 🚀 Starting Enhanced DeepSeek OSINT Bot with Sherlock Integration...
+echo 🚀 Starting Enhanced DeepSeek OSINT Bot...
 python bot.py
 pause
+
