@@ -63,5 +63,6 @@ This script also provides about the same diagnostic information while the LLM is
 
 =============================================================================================================================================================
 
-OSINTbot.py is another iteration of the discord bot, except it has a lot more OSINT features. 
+OSINTbot.py is another iteration of the discord bot, except it has a lot more OSINT features. Sherlock, theHarvester, and Spiderfoot integration.
+
 
