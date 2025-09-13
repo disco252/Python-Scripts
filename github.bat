@@ -1,0 +1,722 @@
+import os
+import discord
+import asyncio
+import torch
+import time
+import requests
+import gc
+import psutil
+import json
+from pathlib import Path
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    logging
+)
+
+# ─── Performance Optimizations ────────────────────────────────────────────────
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["MKL_NUM_THREADS"] = "1"
+torch.set_num_threads(psutil.cpu_count(logical=False))
+logging.set_verbosity_error()
+
+print("🤖 DeepSeek-R1 High-Performance Discord Bot")
+print("=" * 50)
+
+# ─── Dependencies ──────────────────────────────────────────────────────────────
+try:
+    from duckduckgo_search import DDGS
+    print("✅ DuckDuckGo search available")
+except ImportError:
+    print("⚠️ DuckDuckGo search not available")
+    DDGS = None
+
+# ─── System Info ───────────────────────────────────────────────────────────────
+cpu_cores = psutil.cpu_count(logical=False)
+available_ram_gb = psutil.virtual_memory().total / (1024**3)
+print(f"💻 CPU: {cpu_cores} cores | RAM: {available_ram_gb:.1f} GB")
+
+# ─── Discord Setup ──────────────────────────────────────────────────────────────
+intents = discord.Intents.default()
+intents.message_content = True
+bot = discord.Client(intents=intents)
+CHANNEL_ID = 1415387360509821018
+
+# ─── Perplexity Config ─────────────────────────────────────────────────────────
+PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
+PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
+
+async def perplexity_check(query):
+    headers = {
+        "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "sonar-pro",
+        "messages": [{"role": "user", "content": query}],
+        "max_tokens": 1000,
+        "temperature": 0.2
+    }
+    loop = asyncio.get_event_loop()
+    resp = await asyncio.wait_for(
+        loop.run_in_executor(
+            None,
+            lambda: requests.post(PERPLEXITY_URL, headers=headers, json=payload, timeout=30)
+        ),
+        timeout=35.0
+    )
+    return (
+        resp.json()["choices"][0]["message"]["content"]
+        if resp.status_code == 200
+        else f"API error {resp.status_code}"
+    )
+
+# ─── GPU Memory Management ──────────────────────────────────────────────────────
+def cleanup_gpu():
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        gc.collect()
+
+def get_gpu_status():
+    if torch.cuda.is_available():
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        allocated = torch.cuda.memory_allocated(0) / 1024**3
+        return total, allocated, total - allocated
+    return 0, 0, 0
+
+# ─── Optimized Model Loading ────────────────────────────────────────────────────
+MODEL_PATH = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+print("🔄 Loading optimized DeepSeek-R1...")
+gpu_memory_gb = (
+    torch.cuda.get_device_properties(0).total_memory / 1024**3
+    if torch.cuda.is_available()
+    else 0
+)
+if gpu_memory_gb > 0:
+    print(f"💾 GPU: {torch.cuda.get_device_name(0)} ({gpu_memory_gb:.1f} GB)")
+
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_quant_storage=torch.uint8,
+)
+
+cleanup_gpu()
+print("📝 Loading tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_PATH, trust_remote_code=True, use_fast=True
+)
+
+print("🔄 Loading and compiling model...")
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_PATH,
+    quantization_config=quantization_config,
+    device_map={"": 0},
+    trust_remote_code=True,
+    torch_dtype=torch.float16,
+    max_memory={0: "11GB", "cpu": "20GB"}
+)
+model.eval()
+
+try:
+    compiled_model = torch.compile(model, mode="reduce-overhead")
+    print("✅ Model compiled with torch.compile")
+except Exception:
+    compiled_model = model
+    print("⚠️ torch.compile not available, using standard model")
+
+print("🔥 Pre-warming model...")
+dummy_input = tokenizer("Hello", return_tensors="pt", padding=True).to(compiled_model.device)
+with torch.no_grad():
+    compiled_model.generate(**dummy_input, max_new_tokens=5, do_sample=False)
+del dummy_input
+total_gpu, allocated_gpu, free_gpu = get_gpu_status()
+print(f"✅ Model ready! GPU: {allocated_gpu:.1f}GB/{total_gpu:.1f}GB")
+cleanup_gpu()
+
+# ─── High-Performance Inference Wrapper ────────────────────────────────────────
+class OptimizedDeepSeekR1:
+    def __init__(self, model, tokenizer):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = next(model.parameters()).device
+        self.max_thinking = 4608
+        self.max_fast = 2280
+        self.system_msg = (
+            "You are DeepSeek R1, an advanced AI assistant with reasoning capabilities. "
+            "Answer clearly, accurately, and comprehensively."
+        )
+        print(f"🔧 Optimized LLM ready | Thinking: {self.max_thinking:,} | Fast: {self.max_fast:,}")
+
+    def generate(self, messages, thinking=True):
+        start_time = time.time()
+        text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self.tokenizer(text, return_tensors="pt", max_length=32768, truncation=True)
+        inputs = {k: v.to(self.device, non_blocking=True) for k, v in inputs.items()}
+
+        gen_kwargs = {
+            "max_new_tokens": self.max_thinking if thinking else self.max_fast,
+            "do_sample": True,
+            "temperature": 0.7 if thinking else 0.9,
+            "top_p": 0.95 if thinking else 0.9,
+            "top_k": 20 if thinking else 40,
+            "pad_token_id": self.tokenizer.eos_token_id,
+            "repetition_penalty": 1.05,
+            "use_cache": True,
+        }
+
+        with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.float16):
+            outputs = self.model.generate(**inputs, **gen_kwargs)
+
+        new_tokens = outputs[0][len(inputs["input_ids"][0]) :]
+        response = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        elapsed = time.time() - start_time
+        tok_per_sec = len(new_tokens) / elapsed if elapsed > 0 else 0
+
+        del outputs, new_tokens, inputs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return response, tok_per_sec
+
+# Initialize optimized LLM
+llm = OptimizedDeepSeekR1(compiled_model, tokenizer)
+
+# ─── OSINT Tools Manager ───────────────────────────────────────────────────────
+class OSINTToolsManager:
+    def __init__(self, base_path: Path):
+        self.base_path = base_path
+        self.tools_path = base_path / "osint_tools"
+        self.harvester_path = self.tools_path / "theHarvester"
+        self.spiderfoot_path = self.tools_path / "spiderfoot"
+        self.sherlock_path = self.tools_path / "sherlock"
+        # Ensure directories exist
+        self.tools_path.mkdir(parents=True, exist_ok=True)
+
+    # -- Database stub methods --
+    def create_scan_record(self, target, tool):
+        # Implement your DB logic here; return a unique scan_id
+        return int(time.time() * 1000)
+
+    def update_scan_status(self, scan_id, status, count=0):
+        # Update scan status in DB
+        pass
+
+    def store_email_data(self, email, domain, tool, scan_id):
+        pass
+
+    def store_subdomain_data(self, subdomain, domain, tool, scan_id):
+        pass
+
+    def store_ip_data(self, ip, domain, tool, scan_id):
+        pass
+
+    def store_social_profile_data(self, username, platform, url, tool, scan_id):
+        pass
+
+    # -- Sherlock integration --
+    async def run_sherlock_scan(self, username, timeout=60):
+        """Execute Sherlock username search across social platforms"""
+        try:
+            scan_id = self.create_scan_record(username, "sherlock")
+            sherlock_script = self.sherlock_path / "sherlock.py"
+            sherlock_venv = self.sherlock_path / "sherlock_env" / "Scripts" / "python.exe"
+            
+            # Choose Python executable (virtual env if available, otherwise system Python)
+            python_exe = str(sherlock_venv) if sherlock_venv.exists() else "python"
+            
+            # Build command for Sherlock execution with JSON output
+            output_file = str(self.tools_path / f"sherlock_results_{scan_id}.json")
+            
+            cmd = [
+                python_exe,
+                str(sherlock_script),
+                username,
+                "--json",
+                output_file,
+                "--timeout", str(timeout),
+                "--print-found"
+            ]
+            
+            print(f"Executing: {' '.join(cmd)}")
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.sherlock_path,
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
+                results = await self.process_sherlock_results(scan_id, username)
+                self.update_scan_status(scan_id, "completed", len(results))
+                return {"scan_id": scan_id, "results": results, "status": "completed"}
+            else:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                self.update_scan_status(scan_id, "failed")
+                return {"scan_id": scan_id, "error": error_msg, "status": "failed"}
+                
+        except Exception as e:
+            return {"error": str(e), "status": "failed"}
+
+    async def process_sherlock_results(self, scan_id, username):
+        """Process Sherlock JSON results"""
+        results = []
+        json_file = self.tools_path / f"sherlock_results_{scan_id}.json"
+        
+        if json_file.exists():
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    sherlock_data = json.load(f)
+                
+                # Process each platform result
+                for platform, data in sherlock_data.items():
+                    if isinstance(data, dict) and data.get("status") == "Claimed":
+                        url = data.get("url", "")
+                        response_time = data.get("response_time_s", 0)
+                        
+                        # Store social profile data
+                        self.store_social_profile_data(username, platform, url, "sherlock", scan_id)
+                        
+                        results.append({
+                            "type": "social_profile",
+                            "platform": platform,
+                            "username": username,
+                            "url": url,
+                            "response_time": response_time
+                        })
+                
+                # Clean up results file
+                json_file.unlink()
+                
+            except Exception as e:
+                print(f"Error processing Sherlock results: {e}")
+        
+        return results
+
+    # -- TheHarvester integration --
+    async def run_harvester_scan(self, domain, sources="all", limit=100):
+        """Execute TheHarvester scan with direct Python execution (Windows-friendly)"""
+        try:
+            scan_id = self.create_scan_record(domain, "harvester")
+            harvester_script = self.harvester_path / "theHarvester.py"
+            harvester_venv = (
+                self.harvester_path / "harvester_env" / "Scripts" / "python.exe"
+            )
+            python_exe = str(harvester_venv) if harvester_venv.exists() else "python"
+            output_file = str(self.tools_path / f"harvester_results_{scan_id}")
+
+            cmd = [
+                python_exe,
+                str(harvester_script),
+                "-d",
+                domain,
+                "-b",
+                sources,
+                "-l",
+                str(limit),
+                "-f",
+                output_file,
+            ]
+            print(f"Executing: {' '.join(cmd)}")
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.harvester_path,
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                results = await self.process_harvester_results(scan_id, domain)
+                self.update_scan_status(scan_id, "completed", len(results))
+                return {"scan_id": scan_id, "results": results, "status": "completed"}
+            else:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                self.update_scan_status(scan_id, "failed")
+                return {"scan_id": scan_id, "error": error_msg, "status": "failed"}
+        except Exception as e:
+            return {"error": str(e), "status": "failed"}
+
+    async def process_harvester_results(self, scan_id, domain):
+        """Process TheHarvester results from various output formats"""
+        results = []
+        possible_files = [
+            self.tools_path / f"harvester_results_{scan_id}.xml",
+            self.tools_path / f"harvester_results_{scan_id}.html",
+            self.tools_path / f"harvester_results_{scan_id}.json",
+            self.tools_path / f"harvester_results_{scan_id}.txt",
+        ]
+
+        for results_file in possible_files:
+            if results_file.exists():
+                try:
+                    content = results_file.read_text(encoding="utf-8", errors="ignore")
+                    import re
+
+                    emails = re.findall(
+                        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", content
+                    )
+                    hosts = re.findall(
+                        rf"\b(?:[a-z0-9-]+\.)*[a-z0-9-]+\.{re.escape(domain)}\b",
+                        content,
+                        re.IGNORECASE,
+                    )
+                    ips = re.findall(
+                        r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", content
+                    )
+
+                    for email in set(emails):
+                        self.store_email_data(email, email.split("@")[1], "harvester", scan_id)
+                        results.append({"type": "email", "value": email})
+
+                    for host in set(hosts):
+                        if host.lower() != domain.lower():
+                            self.store_subdomain_data(host, domain, "harvester", scan_id)
+                            results.append({"type": "subdomain", "value": host})
+
+                    for ip in set(ips):
+                        self.store_ip_data(ip, domain, "harvester", scan_id)
+                        results.append({"type": "ip", "value": ip})
+
+                    results_file.unlink()
+                    break
+                except Exception as e:
+                    print(f"Error processing {results_file}: {e}")
+                    continue
+
+        return results
+
+    # -- SpiderFoot integration (example stub) --
+    async def run_spiderfoot_scan(self, domain, modules=None, timeout=300):
+        scan_id = self.create_scan_record(domain, "spiderfoot")
+        sf_script = self.spiderfoot_path / "sf.py"
+        sf_venv = self.spiderfoot_path / "sf_env" / "Scripts" / "python.exe"
+        python_exe = str(sf_venv) if sf_venv.exists() else "python"
+        output_file = str(self.tools_path / f"spiderfoot_results_{scan_id}.json")
+
+        cmd = [
+            python_exe,
+            str(sf_script),
+            "-s",
+            domain,
+            "-o",
+            output_file,
+            "-m",
+            ",".join(modules or ["subdomain", "ip", "email"]),
+            "-t",
+            str(timeout),
+        ]
+        print(f"Executing: {' '.join(cmd)}")
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self.spiderfoot_path,
+        )
+        stdout, stderr = await process.communicate()
+
+        if process.returncode == 0:
+            # Implement process_spiderfoot_results similarly
+            self.update_scan_status(scan_id, "completed", 0)
+            return {"scan_id": scan_id, "results": [], "status": "completed"}
+        else:
+            self.update_scan_status(scan_id, "failed")
+            return {"scan_id": scan_id, "error": stderr.decode(), "status": "failed"}
+
+# Instantiate OSINT manager
+osint_manager = OSINTToolsManager(Path.cwd())
+
+# ─── Cached Search (Optimized) ──────────────────────────────────────────────────
+web_cache = {}
+CACHE_TTL = 86400
+
+async def fast_ddg_search(query, max_results=5):
+    if not DDGS:
+        return ""
+    cache_key = query.lower().strip()
+    now = time.time()
+    if cache_key in web_cache and now - web_cache[cache_key][0] < CACHE_TTL:
+        return web_cache[cache_key][1]
+    try:
+        ddg = DDGS()
+        results = [
+            f"{i+1}. {r['title']}\n{r['body']}"
+            for i, r in enumerate(ddg.text(query, max_results=max_results))
+            if r.get("title") and r.get("body")
+        ]
+        text = "\n\n".join(results)
+        web_cache[cache_key] = (now, text)
+        if len(web_cache) > 8192:
+            oldest = min(web_cache.keys(), key=lambda k: web_cache[k][0])
+            del web_cache[oldest]
+        return text
+    except:
+        return ""
+
+async def fast_serp_search(query, max_results=3):
+    try:
+        key = os.getenv("SERPAPI_KEY")
+        if not key:
+            return ""
+        params = {"engine": "google", "q": query, "api_key": key, "num": max_results}
+        loop = asyncio.get_event_loop()
+        resp = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: requests.get("https://serpapi.com/search", params=params, timeout=10)
+            ),
+            timeout=15.0
+        )
+        data = resp.json()
+        results = [
+            f"{i+1}. {r['title']}\n{r['snippet']}"
+            for i, r in enumerate(data.get("organic_results", [])[:max_results])
+            if r.get("title")
+        ]
+        if data.get("answer_box", {}).get("answer"):
+            results.insert(0, f"Quick Answer: {data['answer_box']['answer']}")
+        return "\n\n".join(results)
+    except:
+        return ""
+
+# ─── Optimized Discord Helpers ──────────────────────────────────────────────────
+async def fast_send(ch, txt):
+    if not txt:
+        await ch.send("No response.")
+        return
+    chunks = []
+    while txt:
+        chunk = txt[:1900]
+        if len(txt) > 1900:
+            last_period = chunk.rfind(". ")
+            if last_period > 950:
+                chunk = chunk[: last_period + 1]
+        chunks.append(chunk)
+        txt = txt[len(chunk) :].strip()
+    for i, chunk in enumerate(chunks):
+        await ch.send(chunk)
+        if i < len(chunks) - 1:
+            await asyncio.sleep(0.2)
+
+def quick_needs_search(q):
+    return any(
+        w in q.lower()
+        for w in ["current", "latest", "news", "who", "what", "when", "where", "202"]
+    )
+
+# ─── Optimized Bot Events ───────────────────────────────────────────────────────
+@bot.event
+async def on_ready():
+    print("✅ High-performance bot online:", bot.user)
+    channel = bot.get_channel(CHANNEL_ID)
+    total_gpu, allocated_gpu, free_gpu = get_gpu_status()
+
+    # Enhanced startup message with Sherlock integration
+    startup_message = f"""🚀 **DeepSeek-R1 High-Performance Discord Bot Ready!**
+
+**System Status:**
+• GPU: {allocated_gpu:.1f}GB/{total_gpu:.1f}GB | Compiled: ✅
+• Features: DuckDuckGo, Perplexity, OSINT Scans
+
+**📋 Available Commands:**
+
+**🧠 AI & Search Commands:**
+• `!ask <question>` - Deep reasoning mode with thinking tokens
+• `!fast <question>` - Quick response mode for simple queries  
+• `!search <query>` - Web search + AI analysis
+• `!check <query>` - Direct Perplexity API lookup
+
+**🔍 OSINT Reconnaissance Tools:**
+
+**🌾 TheHarvester - Email & Domain Intelligence**
+• `!harvester <domain.com>` - Comprehensive domain reconnaissance
+• **What it finds:** Email addresses, subdomains, IP addresses, hostnames
+• **Sources:** Google, Bing, DuckDuckGo, LinkedIn, Twitter, and 40+ more
+• **Usage Example:** `!harvester example.com`
+
+**🕷️ SpiderFoot - Advanced OSINT Automation**  
+• `!spiderfoot <domain.com>` - Multi-module intelligence gathering
+• **What it finds:** DNS records, SSL certs, social media, vulnerabilities, leaked data
+• **Modules:** 200+ reconnaissance modules for deep investigation
+• **Usage Example:** `!spiderfoot target.org`
+
+**🔍 Sherlock - Social Media Username Hunter**
+• `!sherlock <username>` - Hunt usernames across 350+ social platforms
+• **What it finds:** Active social media profiles, account existence verification
+• **Platforms:** GitHub, Instagram, Twitter, Reddit, TikTok, LinkedIn, and 340+ more
+• **Usage Example:** `!sherlock john_doe`
+• **Output:** Direct profile URLs, response times, platform verification
+• **Speed:** 60-second timeout with concurrent platform checking
+
+**📊 Results Format:**
+• Real-time scan status updates
+• Categorized findings (emails, subdomains, IPs, social profiles)
+• Clickable URLs for immediate profile access
+• Response time metrics for platform verification
+• Error reporting for troubleshooting
+
+**⚙️ Setup Requirements:**
+• Sherlock: Located in `osint_tools/sherlock/`
+• JSON output format for structured data processing
+• Optional virtual environment support
+
+**Ready for reconnaissance operations!** 🎯"""
+
+    await channel.send(startup_message)
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user or message.channel.id != CHANNEL_ID:
+        return
+
+    content = message.content.strip()
+    if content.startswith("!ask "):
+        cmd, query = "ask", content[5:].strip()
+    elif content.startswith("!fast "):
+        cmd, query = "fast", content[6:].strip()
+    elif content.startswith("!search "):
+        cmd, query = "search", content[8:].strip()
+    elif content.startswith("!check "):
+        cmd, query = "check", content[7:].strip()
+    elif content.startswith("!harvester "):
+        cmd, query = "harvester", content[11:].strip()
+    elif content.startswith("!spiderfoot "):
+        cmd, query = "spiderfoot", content[12:].strip()
+    elif content.startswith("!sherlock "):
+        cmd, query = "sherlock", content[10:].strip()
+    else:
+        return
+
+    if not query:
+        await message.channel.send("Please provide a parameter.")
+        return
+
+    async with message.channel.typing():
+        try:
+            if cmd == "check":
+                result = await perplexity_check(query)
+                await fast_send(message.channel, f"🔍 **Perplexity:** {result}")
+                return
+
+            if cmd == "harvester":
+                await message.channel.send(f"🌾 **Starting TheHarvester scan for:** `{query}`")
+                outcome = await osint_manager.run_harvester_scan(query)
+                if outcome['status'] == 'completed':
+                    results_summary = []
+                    for result in outcome.get('results', []):
+                        results_summary.append(f"• **{result['type']}:** `{result['value']}`")
+                    
+                    summary_text = f"🌾 **TheHarvester Results for {query}:**\n"
+                    summary_text += f"**Status:** {outcome['status'].title()}\n"
+                    summary_text += f"**Items Found:** {len(outcome.get('results', []))}\n\n"
+                    
+                    if results_summary:
+                        summary_text += "**Discovered Assets:**\n" + "\n".join(results_summary[:20])
+                        if len(results_summary) > 20:
+                            summary_text += f"\n*...and {len(results_summary) - 20} more items*"
+                    else:
+                        summary_text += "*No assets discovered*"
+                        
+                    await fast_send(message.channel, summary_text)
+                else:
+                    await fast_send(message.channel, f"🌾 **TheHarvester Error:** {outcome.get('error', 'Unknown error')}")
+                return
+
+            if cmd == "spiderfoot":
+                await message.channel.send(f"🕷️ **Starting SpiderFoot scan for:** `{query}`")
+                outcome = await osint_manager.run_spiderfoot_scan(query)
+                await fast_send(
+                    message.channel,
+                    f"🕷️ **SpiderFoot:** {outcome['status'].title()} – {len(outcome.get('results', []))} items discovered"
+                )
+                return
+
+            if cmd == "sherlock":
+                await message.channel.send(f"🔍 **Starting Sherlock username search for:** `{query}`")
+                outcome = await osint_manager.run_sherlock_scan(query)
+                
+                if outcome['status'] == 'completed':
+                    results = outcome.get('results', [])
+                    
+                    if results:
+                        # Group results by type for better presentation
+                        profile_results = [r for r in results if r['type'] == 'social_profile']
+                        
+                        summary_text = f"🔍 **Sherlock Results for `{query}`:**\n"
+                        summary_text += f"**Status:** {outcome['status'].title()}\n"
+                        summary_text += f"**Profiles Found:** {len(profile_results)}\n\n"
+                        
+                        if profile_results:
+                            summary_text += "**Active Social Media Profiles:**\n"
+                            
+                            # Sort by platform name and show first 15 results
+                            sorted_profiles = sorted(profile_results, key=lambda x: x['platform'])
+                            
+                            for result in sorted_profiles[:15]:
+                                platform = result['platform']
+                                url = result['url']
+                                response_time = result.get('response_time', 0)
+                                
+                                # Format response time
+                                time_str = f" ({response_time:.2f}s)" if response_time > 0 else ""
+                                summary_text += f"• **{platform}:** {url}{time_str}\n"
+                            
+                            if len(sorted_profiles) > 15:
+                                summary_text += f"\n*...and {len(sorted_profiles) - 15} more profiles found*"
+                        else:
+                            summary_text += "*No active profiles found*"
+                    else:
+                        summary_text = f"🔍 **Sherlock Results:** No profiles found for `{query}`"
+                    
+                    await fast_send(message.channel, summary_text)
+                else:
+                    await fast_send(message.channel, f"🔍 **Sherlock Error:** {outcome.get('error', 'Unknown error')}")
+                return
+
+            # Build context for AI responses
+            context = llm.system_msg
+            if cmd in ("search", "ask") and quick_needs_search(query):
+                web_results = await fast_ddg_search(query, 5) or await fast_serp_search(query, 3)
+                if web_results:
+                    context += f"\n\nWeb results:\n{web_results}"
+
+            messages = [
+                {"role": "system", "content": context},
+                {"role": "user", "content": query}
+            ]
+            thinking = (cmd == "ask")
+            response, tok_per_sec = llm.generate(messages, thinking=thinking)
+            tag = {"ask": "🧠", "fast": "⚡", "search": "🌐"}[cmd]
+            await fast_send(message.channel, f"{tag} {response}")
+
+        except Exception as e:
+            await message.channel.send(f"❌ **Error:** {e}")
+
+# ─── Launch Optimized Bot ──────────────────────────────────────────────────────
+if __name__ == "__main__":
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        print("❌ Set DISCORD_TOKEN environment variable")
+        exit(1)
+
+    print("🚀 Launching high-performance DeepSeek-R1 bot...")
+    try:
+        bot.run(token, log_handler=None)
+    except KeyboardInterrupt:
+        print("👋 Shutting down...")
+    except Exception as e:
+        print(f"❌ Bot error: {e}")
+    finally:
+        cleanup_gpu()
+        print("🧹 Cleanup completed")
