@@ -436,7 +436,14 @@ async def on_message(message):
             ]
             thinking = (cmd == "ask")
             response, tok_per_sec = llm.generate(messages, thinking=thinking)
-            tag = {"ask": "🧠", "fast": "⚡", "search": "🌐"}[cmd]
+            tag = {
+                "ask": "🧠",
+                "fast": "⚡",
+                "search": "🌐",
+                "harvester": "🌾",
+                "spiderfoot": "🕷️",
+                "sherlock": "🔍",
+            }.get(cmd, "🤖")
             await fast_send(message.channel, f"{tag} {response}")
 
         except Exception as e:
@@ -459,3 +466,4 @@ if __name__ == "__main__":
     finally:
         cleanup_gpu()
         print("🧹 Cleanup completed")
+
