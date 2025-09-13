@@ -36,7 +36,7 @@ print(f"💻 CPU: {cpu_cores} cores | RAM: {available_ram_gb:.1f} GB")
 intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Client(intents=intents)
-CHANNEL_ID = DISCORD CHANNEL ID
+CHANNEL_ID = YOUR CHANNEL ID
 
 # ─── Response Cleaning ──────────────────────────────────────────────────────────
 def clean_llm_response(text: str) -> str:
@@ -60,7 +60,7 @@ def clean_llm_response(text: str) -> str:
     return out.strip()
 
 # ─── Perplexity Config ─────────────────────────────────────────────────────────
-PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
+PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "API KEY3")
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 
 async def perplexity_check(query: str) -> str:
@@ -226,6 +226,52 @@ class OSINTToolsManager:
                 await asyncio.sleep(5)
                 return True
         return False
+
+    async def run_harvester_scan(self, domain, limit=100):
+        scan_id = self.create_scan_record(domain, "harvester")
+        repo = self.harv
+        script = repo / "theHarvester.py"
+        # Activate the repo venv automatically via "uv run"
+        cmd = ["uv", "run", "theHarvester", "-d", domain, "-b", "all", "-l", str(limit)]
+        print(f"🌾 Executing TheHarvester: {' '.join(cmd)}")
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(repo)
+        )
+        out, err = await proc.communicate()
+        rc = proc.returncode
+        text = out.decode(errors="ignore")
+        if rc != 0:
+            return {"scan_id": scan_id, "status": "failed", "error": err.decode(errors="ignore")}
+
+        results = []
+        for line in text.splitlines():
+            m_email = re.search(r"Email:\s+(\S+@\S+)", line)
+            m_sub = re.search(r"Hosts?\s+Found:\s+(\S+)", line)
+            m_ip = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
+            if m_email:
+                results.append({"type":"email","value":m_email.group(1)})
+            if m_sub:
+                results.append({"type":"subdomain","value":m_sub.group(1)})
+            if m_ip:
+                results.append({"type":"ip","value":m_ip.group(1)})
+
+        return {"scan_id": scan_id, "status": "completed", "results": results}
+
+# In your on_message:
+
+        if cmd == "harvester":
+            await message.channel.send(f"🌾 Starting TheHarvester scan for `{query}`…")
+            outcome = await osint_manager.run_harvester_scan(query)
+            if outcome["status"] != "completed":
+                return await fast_send(message.channel, f"🌾 Error: {outcome.get('error','unknown')}")
+            items = outcome["results"]
+            if not items:
+                return await fast_send(message.channel, f"🌾 No assets found for `{query}`.")
+            lines = [f"• **{r['type']}**: `{r['value']}`" for r in items]
+            return await fast_send(message.channel, "🌾 TheHarvester results:\n" + "\n".join(lines))
 
     async def run_spiderfoot_scan(self, target, timeout=300):
         """Run SpiderFoot scan using CLI method"""
