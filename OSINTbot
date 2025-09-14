@@ -36,7 +36,7 @@ print(f"💻 CPU: {cpu_cores} cores | RAM: {available_ram_gb:.1f} GB")
 intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Client(intents=intents)
-CHANNEL_ID = CHANNEL ID FOR DISCORD
+CHANNEL_ID = DISCORD CHANNEL ID
 
 # Create downloads directory
 downloads_dir = Path("downloads")
@@ -52,35 +52,30 @@ def count_tokens(text: str, tokenizer) -> int:
         return max(1, len(text) // 4)
 
 def parse_token_limit(query: str, default_tokens: int = 2048) -> tuple[str, int]:
-    # Accept tokens=1024 or max_tokens=1024 in the query
     m = re.search(r'\b(?:tokens|max_tokens)=(\d+)\b', query, flags=re.IGNORECASE)
     if not m:
         return query, default_tokens
     limit = int(m.group(1))
-    limit = max(256, min(4096, limit))  # clamp to safe range
+    limit = max(256, min(4096, limit))
     cleaned = re.sub(r'\b(?:tokens|max_tokens)=(\d+)\b', '', query, flags=re.IGNORECASE).strip()
     return cleaned, limit
 
 # ─── File Processing Functions ──────────────────────────────────────────────────
 async def extract_text_from_attachment(attachment, token_limit: int = 2048):
-    """Extract text content from Discord attachment and return a combined analysis for big files"""
     try:
         file_data = await attachment.read()
         filename = attachment.filename.lower()
         print(f"📎 Processing {filename} ({len(file_data)} bytes) with max {token_limit} tokens/chunk")
 
-        # Plain text-like files
         if filename.endswith(('.txt', '.md', '.py', '.js', '.html', '.css', '.xml', '.json')):
             text = file_data.decode('utf-8', errors='ignore')
             print(f"📎 Extracted {len(text)} characters from text file")
             return await process_large_text(text, filename, token_limit)
 
-        # CSV
         if filename.endswith('.csv'):
             content = file_data.decode('utf-8', errors='ignore')
             return await process_large_text(f"CSV Data:\n{content}", filename, token_limit)
 
-        # PDF
         if filename.endswith('.pdf'):
             try:
                 import PyPDF2
@@ -96,6 +91,7 @@ async def extract_text_from_attachment(attachment, token_limit: int = 2048):
                         full_text += f"\n--- Page {i+1} ---\n{page_text}\n"
                         if (i + 1) % 10 == 0:
                             print(f"📎 Processed {i+1}/{page_count} pages")
+                            await asyncio.sleep(0)  # Yield control
                     except Exception as pe:
                         print(f"📎 Page {i+1} error: {pe}")
                         full_text += f"\n--- Page {i+1} (Error) ---\n<no text>\n"
@@ -107,7 +103,6 @@ async def extract_text_from_attachment(attachment, token_limit: int = 2048):
             except Exception as e:
                 return f"Error reading PDF: {e}"
 
-        # Word
         if filename.endswith(('.docx', '.doc')):
             try:
                 import docx
@@ -120,7 +115,6 @@ async def extract_text_from_attachment(attachment, token_limit: int = 2048):
             except Exception as e:
                 return f"Error reading Word document: {e}"
 
-        # Excel
         if filename.endswith(('.xlsx', '.xls')):
             try:
                 import openpyxl
@@ -145,7 +139,7 @@ async def extract_text_from_attachment(attachment, token_limit: int = 2048):
         return f"Error processing attachment {attachment.filename}: {e}"
 
 async def process_large_text(full_text: str, filename: str, max_tokens: int = 2048) -> str:
-    """Split by token budget and summarize each chunk, then combine"""
+    """Split by token budget and summarize each chunk asynchronously"""
     total_est_toks = count_tokens(full_text, tokenizer)
     if total_est_toks <= max_tokens:
         return full_text
@@ -160,10 +154,10 @@ async def process_large_text(full_text: str, filename: str, max_tokens: int = 20
         window = max_tokens * 3
         end = min(n, start + window)
         piece = full_text[start:end]
-        # shrink until within token budget
+        # Shrink until within token budget
         while count_tokens(piece, tokenizer) > max_tokens and len(piece) > 200:
             piece = piece[:-200]
-        # try to break at a boundary
+        # Try to break at a boundary
         if end < n:
             bp = max(piece.rfind('. '), piece.rfind('\n'))
             if bp > len(piece) * 0.6:
@@ -175,7 +169,7 @@ async def process_large_text(full_text: str, filename: str, max_tokens: int = 20
 
     print(f"📎 Built {len(chunks)} chunks")
 
-    # Summarize each chunk quickly
+    # Summarize each chunk asynchronously
     summaries = []
     for idx, ch in enumerate(chunks, 1):
         try:
@@ -187,12 +181,19 @@ async def process_large_text(full_text: str, filename: str, max_tokens: int = 20
                 {"role": "system", "content": "Extract clear, organized key points from the provided section."},
                 {"role": "user", "content": prompt}
             ]
-            resp, _ = llm.generate(msgs, thinking=False)
-            summaries.append(f"Section {idx}/{len(chunks)}:\n{resp}")
-            await asyncio.sleep(0.25)
+            
+            # Use asyncio.to_thread to prevent blocking the event loop
+            resp, _ = await asyncio.to_thread(llm.generate, msgs, False)
+            summaries.append(f"**Section {idx}/{len(chunks)}:**\n{resp}")
+            print(f"📎 Completed chunk {idx}/{len(chunks)}")
+            
+            # Clean up GPU memory and yield control
             cleanup_gpu()
+            await asyncio.sleep(0)
+            
         except Exception as e:
-            summaries.append(f"Section {idx}/{len(chunks)}: Error: {e}")
+            summaries.append(f"**Section {idx}/{len(chunks)}:**\nError: {e}")
+            print(f"📎 Error processing chunk {idx}: {e}")
 
     combined = (
         f"**COMPLETE ANALYSIS OF '{filename.upper()}'**\n\n"
@@ -200,20 +201,6 @@ async def process_large_text(full_text: str, filename: str, max_tokens: int = 20
         + "\n\n".join(summaries)
     )
     return combined
-
-def truncate_text(text: str, filename: str, max_chars: int = 20000) -> str:
-    if len(text) <= max_chars:
-        return text
-    truncated = text[:max_chars]
-    last_period = truncated.rfind('. ')
-    if last_period > max_chars * 0.8:
-        truncated = truncated[:last_period + 1]
-    total_chars = len(text)
-    truncated += (
-        f"\n\n[NOTE: File '{filename}' truncated from {total_chars:,} to {len(truncated):,} characters.]"
-    )
-    print(f"📎 Truncated {filename} to {len(truncated)} chars")
-    return truncated
 
 # ─── Cleaning ──────────────────────────────────────────────────────────────────
 def clean_llm_response(text: str) -> str:
@@ -253,7 +240,7 @@ async def perplexity_check(query: str) -> str:
         loop.run_in_executor(None, lambda: requests.post(PERPLEXITY_URL, headers=headers, json=payload, timeout=30)),
         timeout=35.0
     )
-    return resp.json()["choices"]["message"]["content"] if resp.status_code == 200 else f"API error {resp.status_code}"
+    return resp.json()["choices"][0]["message"]["content"] if resp.status_code == 200 else f"API error {resp.status_code}"
 
 # ─── GPU Memory Management ──────────────────────────────────────────────────────
 def cleanup_gpu():
@@ -343,7 +330,7 @@ class OptimizedDeepSeekR1:
         }
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.float16):
             outputs = self.model.generate(**inputs, **gen_kwargs)
-        new_tokens = outputs[len(inputs["input_ids"]):]
+        new_tokens = outputs[0][len(inputs["input_ids"][0]):]
         response = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
         response = clean_llm_response(response)
         tokps = len(new_tokens) / max(1e-6, time.time() - start)
@@ -354,7 +341,7 @@ class OptimizedDeepSeekR1:
 
 llm = OptimizedDeepSeekR1(compiled_model, tokenizer)
 
-# ─── OSINT Manager (unchanged logic) ───────────────────────────────────────────
+# ─── OSINT Manager ───────────────────────────────────────────────────────────────
 class OSINTToolsManager:
     def __init__(self, base: Path):
         self.base = base
@@ -521,7 +508,7 @@ async def on_ready():
         f"• Features: Perplexity, OSINT Scans, File Analysis\n\n"
         "**📋 Available Commands:**\n\n"
         "**🧠 AI & Search Commands:**\n"
-        "• `!ask <question>` (supports file attachments; add `tokens=1024` to set chunk size)\n"
+        "• `!ask <question>` (supports file attachments; add `tokens=nnn` to set chunk size)\n"
         "• `!fast <question>`\n"
         "• `!search <query>`\n"
         "• `!check <query>`"
@@ -531,7 +518,11 @@ async def on_ready():
         "• `!harvester <domain.com>`\n"
         "• `!spiderfoot <domain.com>`\n"
         "• `!sherlock <username>`\n\n"
-        "**📎 Supported files:** txt, md, py, js, html, css, xml, json, csv, pdf, docx, xlsx"
+        "**📎 Supported files:** txt, md, py, js, html, css, xml, json, csv, pdf, docx, xlsx\n\n"
+        "**Token Control Examples:**\n"
+        "• `!ask tokens=512 read this book` - Small chunks\n"
+        "• `!ask tokens=2048 analyze document` - Default\n"
+        "• `!ask tokens=4096 detailed analysis` - Large chunks"
     )
     try:
         await channel.send(startup_message_1)
@@ -575,17 +566,17 @@ async def on_message(message):
                 # Attachments
                 file_content = ""
                 if message.attachments and cmd == "ask":
-                    await message.channel.send(f"📎 Processing file attachments (tokens={token_limit} per chunk)…")
+                    await message.channel.send(f"📎 Processing {len(message.attachments)} file(s) (tokens={token_limit} per chunk)…")
                     for attachment in message.attachments:
-                        if attachment.size > 10 * 1024 * 1024:  # 10MB
-                            await message.channel.send(f"⚠️ File `{attachment.filename}` too large (max 10MB)")
+                        if attachment.size > 50 * 1024 * 1024:  # 50MB
+                            await message.channel.send(f"⚠️ File `{attachment.filename}` too large (max 50MB)")
                             continue
                         print(f"📎 Attachment: {attachment.filename} ({attachment.size} bytes)")
                         extracted = await extract_text_from_attachment(attachment, token_limit)
                         if extracted:
                             # If a big analysis was produced, send it directly
                             if "COMPLETE ANALYSIS OF" in extracted and len(extracted) > 2000:
-                                await fast_send(message.channel, f"🧠📎 {extracted}")
+                                return await fast_send(message.channel, f"🧠📎 {extracted}")
                             else:
                                 file_content += f"\n\n--- Content from {attachment.filename} ---\n{extracted}\n"
 
@@ -595,8 +586,10 @@ async def on_message(message):
                     ctx += f"\n\nThe user has provided the following file content for analysis:\n{file_content}"
                     query = f"{query}\n\nPlease analyze the provided file content and answer the question accordingly."
 
+                # Use asyncio.to_thread for non-blocking generation
                 msgs = [{"role": "system", "content": ctx}, {"role": "user", "content": query}]
-                resp, _ = llm.generate(msgs, thinking=(cmd == "ask"))
+                resp, _ = await asyncio.to_thread(llm.generate, msgs, (cmd == "ask"))
+                
                 tag = {"ask": "🧠", "fast": "⚡", "search": "🌐"}.get(cmd, "🤖")
                 if file_content and cmd == "ask":
                     tag += f" 📎 (tokens={token_limit})"
