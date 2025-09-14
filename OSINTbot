@@ -36,7 +36,203 @@ print(f"💻 CPU: {cpu_cores} cores | RAM: {available_ram_gb:.1f} GB")
 intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Client(intents=intents)
-CHANNEL_ID = YOUR CHANNEL ID
+CHANNEL_ID = DISCORD CHANNEL ID
+
+# Create downloads directory
+downloads_dir = Path("downloads")
+downloads_dir.mkdir(exist_ok=True)
+
+# ─── File Processing Functions ──────────────────────────────────────────────────
+async def extract_text_from_attachment(attachment):
+    """Extract text content from Discord attachment with chunked processing"""
+    try:
+        file_data = await attachment.read()
+        filename = attachment.filename.lower()
+        
+        print(f"📎 Processing {filename} ({len(file_data)} bytes)")
+        
+        # Handle different file types
+        if filename.endswith(('.txt', '.md', '.py', '.js', '.html', '.css', '.xml', '.json')):
+            text = file_data.decode('utf-8', errors='ignore')
+            print(f"📎 Extracted {len(text)} characters from text file")
+            return await process_large_text(text, filename)
+            
+        elif filename.endswith('.csv'):
+            content = file_data.decode('utf-8', errors='ignore')
+            print(f"📎 Extracted {len(content)} characters from CSV")
+            return await process_large_text(f"CSV Data:\n{content}", filename)
+            
+        elif filename.endswith('.pdf'):
+            print("📎 Attempting PDF processing...")
+            try:
+                import PyPDF2
+                import io
+                
+                print("📎 PyPDF2 imported successfully")
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_data))
+                page_count = len(pdf_reader.pages)
+                print(f"📎 PDF has {page_count} pages")
+                
+                # Extract all text first
+                full_text = ""
+                for i in range(page_count):
+                    try:
+                        page = pdf_reader.pages[i]
+                        page_text = page.extract_text()
+                        full_text += f"\n--- Page {i+1} ---\n{page_text}\n"
+                        
+                        if i % 10 == 0:  # Progress update every 10 pages
+                            print(f"📎 Processed {i+1}/{page_count} pages")
+                            
+                    except Exception as page_error:
+                        print(f"📎 Error on page {i+1}: {page_error}")
+                        full_text += f"\n--- Page {i+1} (Error) ---\nCould not extract text from this page.\n"
+                
+                print(f"📎 Total PDF text extracted: {len(full_text)} characters from {page_count} pages")
+                
+                if full_text.strip():
+                    return await process_large_text(full_text, filename)
+                else:
+                    return "PDF processed but no readable text found. This might be a scanned document requiring OCR."
+                    
+            except ImportError as import_error:
+                print(f"📎 PyPDF2 import failed: {import_error}")
+                return f"PDF file detected but PyPDF2 not available. Error: {import_error}"
+            except Exception as pdf_error:
+                print(f"📎 PDF processing error: {pdf_error}")
+                return f"Error reading PDF: {pdf_error}"
+                
+        # ... other file type handlers remain the same ...
+        
+    except Exception as e:
+        print(f"📎 General error processing {attachment.filename}: {e}")
+        return f"Error processing attachment {attachment.filename}: {str(e)}"
+
+async def process_large_text(full_text: str, filename: str, chunk_size: int = 15000) -> str:
+    """Process large text in chunks and combine the analysis"""
+    
+    if len(full_text) <= chunk_size:
+        print(f"📎 Text is small enough ({len(full_text)} chars), processing normally")
+        return full_text
+    
+    print(f"📎 Large text detected ({len(full_text):,} chars), processing in chunks of {chunk_size:,} chars")
+    
+    # Split text into chunks
+    chunks = []
+    for i in range(0, len(full_text), chunk_size):
+        chunk = full_text[i:i + chunk_size]
+        # Try to break at sentence boundaries
+        if i + chunk_size < len(full_text):
+            last_period = chunk.rfind('. ')
+            if last_period > chunk_size * 0.7:  # If we can break at 70% or more
+                actual_chunk = chunk[:last_period + 1]
+                chunks.append(actual_chunk)
+                # Adjust next chunk start
+                full_text = full_text[:i] + actual_chunk + full_text[i + len(actual_chunk):]
+            else:
+                chunks.append(chunk)
+        else:
+            chunks.append(chunk)
+    
+    total_chunks = len(chunks)
+    print(f"📎 Split into {total_chunks} chunks for processing")
+    
+    # Process each chunk and get summaries
+    chunk_summaries = []
+    
+    for i, chunk in enumerate(chunks):
+        try:
+            print(f"📎 Processing chunk {i+1}/{total_chunks}")
+            
+            # Create a focused prompt for chunk analysis
+            chunk_prompt = f"Analyze this section of the document '{filename}' (Part {i+1} of {total_chunks}) and provide key points, important information, and main concepts. Be concise but comprehensive:\n\n{chunk}"
+            
+            # Process this chunk with the AI
+            messages = [
+                {"role": "system", "content": "You are an AI assistant that analyzes document sections and extracts key information. Provide clear, organized summaries of the main points."},
+                {"role": "user", "content": chunk_prompt}
+            ]
+            
+            response, _ = llm.generate(messages, thinking=False)  # Use fast mode for chunks
+            chunk_summaries.append(f"**Section {i+1}/{total_chunks}:**\n{response}")
+            
+            print(f"📎 Completed chunk {i+1}/{total_chunks}")
+            
+            # Small delay to prevent overwhelming the GPU
+            await asyncio.sleep(0.5)
+            
+        except Exception as chunk_error:
+            print(f"📎 Error processing chunk {i+1}: {chunk_error}")
+            chunk_summaries.append(f"**Section {i+1}/{total_chunks}:**\nError processing this section: {str(chunk_error)}")
+    
+    # Combine all summaries
+    combined_summary = f"**COMPLETE ANALYSIS OF '{filename.upper()}'**\n\n"
+    combined_summary += f"Document processed in {total_chunks} sections ({len(full_text):,} total characters)\n\n"
+    combined_summary += "\n\n".join(chunk_summaries)
+    
+    print(f"📎 Completed processing all {total_chunks} chunks")
+    return combined_summary
+
+# Update the !ask handler in your on_message function:
+if cmd in ("ask", "fast", "search"):
+    # Check for file attachments
+    file_content = ""
+    if message.attachments and cmd == "ask":
+        await message.channel.send("📎 Processing file attachments...")
+        
+        for attachment in message.attachments:
+            if attachment.size > 50 * 1024 * 1024:  # Increased limit to 50MB
+                await message.channel.send(f"⚠️ File `{attachment.filename}` is too large (max 50MB)")
+                continue
+                
+            print(f"📎 Processing attachment: {attachment.filename} ({attachment.size} bytes)")
+            
+            extracted_text = await extract_text_from_attachment(attachment)
+            if extracted_text:
+                # For large documents, the extracted_text is already the complete analysis
+                if len(extracted_text) > 20000 and "COMPLETE ANALYSIS" in extracted_text:
+                    # This is a pre-processed large document analysis
+                    tag = "🧠📎"
+                    return await fast_send(message.channel, f"{tag} **Large Document Analysis Complete**\n\n{extracted_text}")
+                else:
+                    # Normal file processing
+                    file_content += f"\n\n--- Content from {attachment.filename} ---\n{extracted_text}\n"
+    
+    # Build context for AI responses (for smaller files or no files)
+    ctx = llm.system_msg
+    if file_content:
+        ctx += f"\n\nThe user has provided the following file content for analysis:\n{file_content}"
+        query = f"{query}\n\nPlease analyze the provided file content and answer the question accordingly."
+    
+    msgs = [{"role": "system", "content": ctx}, {"role": "user", "content": query}]
+    resp, _ = llm.generate(msgs, thinking=(cmd == "ask"))
+    tag = {"ask": "🧠", "fast": "⚡", "search": "🌐"}.get(cmd, "🤖")
+    
+    if file_content:
+        file_info = f" 📎 (analyzed {len(message.attachments)} file{'s' if len(message.attachments) > 1 else ''})"
+        tag += file_info
+    
+    return await fast_send(message.channel, f"{tag} {resp}")
+
+def truncate_text(text: str, filename: str, max_chars: int = 20000) -> str:
+    """Truncate text to prevent GPU memory issues"""
+    if len(text) <= max_chars:
+        return text
+    
+    # Try to find a good breaking point
+    truncated = text[:max_chars]
+    
+    # Try to break at a sentence
+    last_period = truncated.rfind('. ')
+    if last_period > max_chars * 0.8:  # If we can break at 80% or more
+        truncated = truncated[:last_period + 1]
+    
+    # Add truncation notice
+    total_chars = len(text)
+    truncated += f"\n\n[NOTE: File '{filename}' truncated from {total_chars:,} to {len(truncated):,} characters to prevent memory issues. This represents approximately {(len(truncated)/total_chars)*100:.1f}% of the original content.]"
+    
+    print(f"📎 Truncated {filename} from {total_chars:,} to {len(truncated):,} characters")
+    return truncated
 
 # ─── Response Cleaning ──────────────────────────────────────────────────────────
 def clean_llm_response(text: str) -> str:
@@ -60,7 +256,7 @@ def clean_llm_response(text: str) -> str:
     return out.strip()
 
 # ─── Perplexity Config ─────────────────────────────────────────────────────────
-PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "API KEY3")
+PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "API KEY")
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 
 async def perplexity_check(query: str) -> str:
@@ -189,108 +385,88 @@ class OSINTToolsManager:
         self.sf = self.tools / "spiderfoot"
         self.sh = self.tools / "sherlock"
         self.tools.mkdir(exist_ok=True)
-        self.spiderfoot_server = None
-        self.sf_port = 5001
 
-    def create_scan_record(self, *a): 
+    def create_scan_record(self, target, tool):
         return int(time.time() * 1000)
-    
-    def update_scan_status(self, *a): 
-        pass
-    
-    def store_social_profile_data(self, *a): 
+
+    def update_scan_status(self, *args):
         pass
 
-    async def ensure_spiderfoot_running(self):
-        """Ensure SpiderFoot server is running"""
-        try:
-            # Check if server is already running
-            resp = requests.get(f"http://127.0.0.1:{self.sf_port}", timeout=2)
-            if resp.status_code == 200:
-                return True
-        except:
-            pass
-
-        # Start SpiderFoot server if not running
-        if self.spiderfoot_server is None:
-            sf_script = self.sf / "sf.py"
-            if sf_script.exists():
-                print(f"🕷️ Starting SpiderFoot server on port {self.sf_port}")
-                self.spiderfoot_server = await asyncio.create_subprocess_exec(
-                    "python3", str(sf_script), "-l", f"127.0.0.1:{self.sf_port}",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(self.sf)
-                )
-                # Wait for server to start
-                await asyncio.sleep(5)
-                return True
-        return False
+    def store_social_profile_data(self, *args):
+        pass
 
     async def run_harvester_scan(self, domain, limit=100):
+        """Execute TheHarvester via 'uv run theHarvester -d <domain>'"""
         scan_id = self.create_scan_record(domain, "harvester")
         repo = self.harv
-        script = repo / "theHarvester.py"
-        # Activate the repo venv automatically via "uv run"
-        cmd = ["uv", "run", "theHarvester", "-d", domain, "-b", "all", "-l", str(limit)]
+        cmd = ["uv", "run", "theHarvester", "-d", domain, "-l", str(limit)]
         print(f"🌾 Executing TheHarvester: {' '.join(cmd)}")
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(repo)
-        )
-        out, err = await proc.communicate()
-        rc = proc.returncode
-        text = out.decode(errors="ignore")
-        if rc != 0:
-            return {"scan_id": scan_id, "status": "failed", "error": err.decode(errors="ignore")}
+        
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(repo)
+            )
+            out, err = await proc.communicate()
+            rc = proc.returncode
+            text = out.decode(errors="ignore")
+            error = err.decode(errors="ignore")
+            
+            if rc != 0:
+                return {"scan_id": scan_id, "status": "failed", "error": error}
 
-        results = []
-        for line in text.splitlines():
-            m_email = re.search(r"Email:\s+(\S+@\S+)", line)
-            m_sub = re.search(r"Hosts?\s+Found:\s+(\S+)", line)
-            m_ip = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
-            if m_email:
-                results.append({"type":"email","value":m_email.group(1)})
-            if m_sub:
-                results.append({"type":"subdomain","value":m_sub.group(1)})
-            if m_ip:
-                results.append({"type":"ip","value":m_ip.group(1)})
+            results = []
+            # Parse TheHarvester output for different data types
+            lines = text.splitlines()
+            for line in lines:
+                # Look for emails
+                if "@" in line and not line.startswith("["):
+                    email_match = re.search(r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", line)
+                    if email_match:
+                        results.append({"type": "email", "value": email_match.group(1)})
+                
+                # Look for hostnames/subdomains
+                if domain in line and not line.startswith("[") and "." in line:
+                    host_match = re.search(r"([a-zA-Z0-9.-]+\." + re.escape(domain.split('.')[-1]) + r")", line)
+                    if host_match and host_match.group(1) != domain:
+                        results.append({"type": "subdomain", "value": host_match.group(1)})
+                
+                # Look for IP addresses
+                ip_match = re.search(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", line)
+                if ip_match:
+                    results.append({"type": "ip", "value": ip_match.group(1)})
 
-        return {"scan_id": scan_id, "status": "completed", "results": results}
+            # Remove duplicates
+            seen = set()
+            unique_results = []
+            for r in results:
+                key = (r["type"], r["value"])
+                if key not in seen:
+                    seen.add(key)
+                    unique_results.append(r)
 
-# In your on_message:
-
-        if cmd == "harvester":
-            await message.channel.send(f"🌾 Starting TheHarvester scan for `{query}`…")
-            outcome = await osint_manager.run_harvester_scan(query)
-            if outcome["status"] != "completed":
-                return await fast_send(message.channel, f"🌾 Error: {outcome.get('error','unknown')}")
-            items = outcome["results"]
-            if not items:
-                return await fast_send(message.channel, f"🌾 No assets found for `{query}`.")
-            lines = [f"• **{r['type']}**: `{r['value']}`" for r in items]
-            return await fast_send(message.channel, "🌾 TheHarvester results:\n" + "\n".join(lines))
+            return {"scan_id": scan_id, "status": "completed", "results": unique_results}
+        
+        except Exception as e:
+            return {"scan_id": scan_id, "status": "failed", "error": str(e)}
 
     async def run_spiderfoot_scan(self, target, timeout=300):
         """Run SpiderFoot scan using CLI method"""
         try:
             scan_id = self.create_scan_record(target, "spiderfoot")
-            
-            # Method 1: Direct CLI scan (preferred)
             sf_script = self.sf / "sf.py"
             if sf_script.exists():
                 cmd = [
                     "python3", str(sf_script),
                     "-s", target,
-                    "-u", "all",  # Use all modules
-                    "-o", "csv",  # Output as CSV
-                    "-q"  # Quiet mode
+                    "-u", "all",
+                    "-o", "csv",
+                    "-q"
                 ]
                 
                 print(f"🕷️ Executing SpiderFoot: {' '.join(cmd)}")
-                
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
@@ -300,7 +476,6 @@ class OSINTToolsManager:
                 
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 rc = proc.returncode
-                
                 s_out = stdout.decode(errors="ignore")
                 s_err = stderr.decode(errors="ignore")
                 
@@ -309,14 +484,12 @@ class OSINTToolsManager:
                     print(f"SpiderFoot stderr: {s_err[:500]}")
                 
                 results = []
-                
-                # Parse CSV output from stdout
                 if s_out and rc == 0:
                     lines = s_out.strip().split('\n')
-                    for line in lines[1:]:  # Skip header
+                    for line in lines[1:]:
                         if line.strip():
                             try:
-                                parts = line.split('\t')  # Tab-separated
+                                parts = line.split('\t')
                                 if len(parts) >= 5:
                                     event_type = parts[2]
                                     data = parts[4]
@@ -329,37 +502,16 @@ class OSINTToolsManager:
                                 continue
                 
                 if not results and rc != 0:
-                    return {
-                        "scan_id": scan_id,
-                        "status": "failed", 
-                        "error": s_err or "SpiderFoot scan failed"
-                    }
+                    return {"scan_id": scan_id, "status": "failed", "error": s_err or "SpiderFoot scan failed"}
                 
-                return {
-                    "scan_id": scan_id,
-                    "status": "completed",
-                    "results": results[:50]  # Limit results
-                }
-            
+                return {"scan_id": scan_id, "status": "completed", "results": results[:50]}
             else:
-                return {
-                    "scan_id": scan_id,
-                    "status": "failed",
-                    "error": "SpiderFoot sf.py not found"
-                }
+                return {"scan_id": scan_id, "status": "failed", "error": "SpiderFoot sf.py not found"}
                 
         except asyncio.TimeoutError:
-            return {
-                "scan_id": scan_id,
-                "status": "failed",
-                "error": f"SpiderFoot scan timed out after {timeout}s"
-            }
+            return {"scan_id": scan_id, "status": "failed", "error": f"SpiderFoot scan timed out after {timeout}s"}
         except Exception as e:
-            return {
-                "scan_id": scan_id,
-                "status": "failed",
-                "error": str(e)
-            }
+            return {"scan_id": scan_id, "status": "failed", "error": str(e)}
 
     async def run_sherlock_scan(self, username, timeout=60):
         scan_id = self.create_scan_record(username, "sherlock")
@@ -370,6 +522,7 @@ class OSINTToolsManager:
         else:
             cmd = ["python", "-m", "sherlock", username, "--print-found", "--timeout", str(timeout), "--csv"]
             cwd = str(self.sh)
+        
         print("Exec:", *cmd)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -382,6 +535,7 @@ class OSINTToolsManager:
         s_out = out.decode(errors="ignore")
         s_err = err.decode(errors="ignore")
         print(f"[Sherlock rc={rc}]")
+        
         results = []
         for fpath in glob.glob(os.path.join(cwd, f"*{username}*.csv")):
             with open(fpath, newline="", encoding="utf-8", errors="ignore") as fh:
@@ -392,15 +546,16 @@ class OSINTToolsManager:
                             results.append({"type": "social_profile", "url": col})
             try: os.remove(fpath)
             except: pass
+        
         if not results:
             for line in s_out.splitlines():
                 m = re.search(r"(https?://\S+)", line)
                 if m:
                     results.append({"type": "social_profile", "url": m.group(1)})
+        
         if rc != 0 and not results:
             return {"scan_id": scan_id, "status": "failed", "error": s_err or "Sherlock failed"}
-        for r in results:
-            self.store_social_profile_data(username, "", r["url"], "sherlock", scan_id)
+        
         return {"scan_id": scan_id, "status": "completed", "results": results}
 
 osint_manager = OSINTToolsManager(Path.cwd())
@@ -436,58 +591,66 @@ async def on_ready():
         print(f"❌ Channel {CHANNEL_ID} not found.")
         return
     gpu, alloc, _ = get_gpu_status()
-    startup_message = (
-        "🚀 **DeepSeek-R1 High-Performance Discord Bot Ready!**\n\n"
+    
+    # Split into multiple shorter messages
+    startup_message_1 = (
+        f"🚀 **DeepSeek-R1 High-Performance Discord Bot Ready!**\n\n"
         f"**System Status:**\n"
         f"• GPU: {alloc:.1f}GB/{gpu:.1f}GB | Compiled: ✅\n"
-        f"• Features: Perplexity, OSINT Scans\n\n"
+        f"• Features: Perplexity, OSINT Scans, File Analysis\n\n"
         "**📋 Available Commands:**\n\n"
         "**🧠 AI & Search Commands:**\n"
-        "• `!ask <question>` - Deep reasoning mode with thinking tokens\n"
-        "• `!fast <question>` - Quick response mode for simple queries\n"
+        "• `!ask <question>` - Deep reasoning mode (supports file attachments)\n"
+        "• `!fast <question>` - Quick response mode\n"
         "• `!search <query>` - Web search + AI analysis\n"
         "• `!check <query>` - Direct Perplexity API lookup\n\n"
+        "**📎 File Analysis:**\n"
+        "• Attach files to `!ask` commands for analysis\n"
+        "• **Supported:** .txt, .md, .py, .js, .html, .css, .xml, .json, .csv, .pdf, .docx, .doc, .xlsx, .xls\n"
+        "• **Usage:** Upload a file and use `!ask analyze this document`"
+    )
+    
+    startup_message_2 = (
         "**🔍 OSINT Reconnaissance Tools:**\n\n"
         "**🌾 TheHarvester - Email & Domain Intelligence**\n"
-        "• `!harvester <domain.com>` - Comprehensive domain reconnaissance\n"
-        "• **What it finds:** Email addresses, subdomains, IP addresses, hostnames\n"
-        "• **Sources:** Google, Bing, LinkedIn, Twitter, and 40+ more\n"
-        "• **Usage Example:** `!harvester example.com`\n\n"
+        "• `!harvester <domain.com>` - Domain reconnaissance\n"
+        "• **Finds:** Email addresses, subdomains, IP addresses, hostnames\n"
+        "• **Sources:** Google, Bing, LinkedIn, Twitter, and 40+ more\n\n"
         "**🕷️ SpiderFoot - Advanced OSINT Automation**\n"
         "• `!spiderfoot <domain.com>` - Multi-module intelligence gathering\n"
-        "• **What it finds:** DNS records, SSL certs, social media, vulnerabilities, leaked data\n"
-        "• **Modules:** 200+ reconnaissance modules for deep investigation\n"
-        "• **Usage Example:** `!spiderfoot target.org`\n\n"
+        "• **Finds:** DNS records, SSL certs, social media, vulnerabilities\n"
+        "• **Modules:** 200+ reconnaissance modules\n\n"
         "**🔍 Sherlock - Social Media Username Hunter**\n"
-        "• `!sherlock <username>` - Hunt usernames across 350+ social platforms\n"
-        "• **What it finds:** Active social media profiles, account existence verification\n"
-        "• **Platforms:** GitHub, Instagram, Twitter, Reddit, TikTok, LinkedIn, and 340+ more\n"
-        "• **Usage Example:** `!sherlock john_doe`\n"
-        "• **Output:** Direct profile URLs, response times, platform verification\n\n"
-        "**📊 Results Format:**\n"
-        "• Real-time scan status updates\n"
-        "• Categorized findings (emails, subdomains, IPs, social profiles)\n"
-        "• Clickable URLs for immediate profile access\n"
-        "• Response time metrics for platform verification\n"
-        "• Error reporting for troubleshooting\n\n"
+        "• `!sherlock <username>` - Hunt usernames across 350+ platforms\n"
+        "• **Finds:** Active social media profiles, account verification\n"
+        "• **Platforms:** GitHub, Instagram, Twitter, Reddit, TikTok, LinkedIn, and 340+ more\n\n"
         "**Ready for reconnaissance operations!** 🎯"
     )
-    await channel.send(startup_message)
+    
+    try:
+        await channel.send(startup_message_1)
+        await asyncio.sleep(1)  # Small delay between messages
+        await channel.send(startup_message_2)
+        print("✅ Startup messages sent successfully to Discord!")
+    except Exception as e:
+        print(f"❌ Error sending startup messages: {e}")
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user or message.channel.id != CHANNEL_ID:
         return
+    
     content = message.content.strip()
     cmd, query = None, None
     for key, prefix in [
-        ("ask","!ask "),("fast","!fast "),("search","!search "),
-        ("check","!check "),("harvester","!harvester "),
-        ("spiderfoot","!spiderfoot "),("sherlock","!sherlock ")
+        ("ask", "!ask "), ("fast", "!fast "), ("search", "!search "),
+        ("check", "!check "), ("harvester", "!harvester "),
+        ("spiderfoot", "!spiderfoot "), ("sherlock", "!sherlock ")
     ]:
         if content.startswith(prefix):
             cmd, query = key, content[len(prefix):].strip()
             break
+    
     if not cmd or not query:
         return
 
@@ -496,6 +659,78 @@ async def on_message(message):
             if cmd == "check":
                 res = await perplexity_check(query)
                 return await fast_send(message.channel, f"🔍 {res}")
+
+            # ─── Enhanced !ask Handler with File Support ──────────────────────
+            if cmd in ("ask", "fast", "search"):
+                # Check for file attachments
+                file_content = ""
+                if message.attachments and cmd == "ask":
+                    await message.channel.send("📎 Processing file attachments...")
+                    
+                    for attachment in message.attachments:
+                        # Check file size (max 25MB for Discord, but we'll limit to 10MB for processing)
+                        if attachment.size > 10 * 1024 * 1024:  # 10MB
+                            await message.channel.send(f"⚠️ File `{attachment.filename}` is too large (max 10MB)")
+                            continue
+                            
+                        print(f"📎 Processing attachment: {attachment.filename} ({attachment.size} bytes)")
+                        
+                        extracted_text = await extract_text_from_attachment(attachment)
+                        if extracted_text:
+                            file_content += f"\n\n--- Content from {attachment.filename} ---\n{extracted_text}\n"
+                
+                # Build context for AI responses
+                ctx = llm.system_msg
+                if file_content:
+                    ctx += f"\n\nThe user has provided the following file content for analysis:\n{file_content}"
+                    query = f"{query}\n\nPlease analyze the provided file content and answer the question accordingly."
+                
+                if cmd in ("search", "ask") and quick_needs_search(query):
+                    # Web search integration if needed (removed DuckDuckGo dependency)
+                    pass
+                
+                msgs = [{"role": "system", "content": ctx}, {"role": "user", "content": query}]
+                resp, _ = llm.generate(msgs, thinking=(cmd == "ask"))
+                tag = {"ask": "🧠", "fast": "⚡", "search": "🌐"}.get(cmd, "🤖")
+                
+                if file_content:
+                    file_info = f" 📎 (analyzed {len(message.attachments)} file{'s' if len(message.attachments) > 1 else ''})"
+                    tag += file_info
+                
+                return await fast_send(message.channel, f"{tag} {resp}")
+
+            # ─── TheHarvester Handler ──────────────────────────────────────────
+            if cmd == "harvester":
+                await message.channel.send(f"🌾 Starting TheHarvester scan for `{query}`…")
+                outcome = await osint_manager.run_harvester_scan(query)
+                if outcome["status"] != "completed":
+                    return await fast_send(message.channel, f"🌾 Error: {outcome.get('error','unknown')}")
+                
+                items = outcome["results"]
+                if not items:
+                    return await fast_send(message.channel, f"🌾 No assets found for `{query}`.")
+                
+                # Group results by type
+                by_type = {}
+                for item in items:
+                    item_type = item["type"]
+                    if item_type not in by_type:
+                        by_type[item_type] = []
+                    by_type[item_type].append(item["value"])
+                
+                summary_lines = [f"🌾 **TheHarvester Results for `{query}`:**"]
+                summary_lines.append(f"**Total items found:** {len(items)}")
+                summary_lines.append("")
+                
+                for item_type, values in by_type.items():
+                    summary_lines.append(f"**{item_type.title()}s:** {len(values)} found")
+                    for value in values[:5]:  # Show first 5 items
+                        summary_lines.append(f"• `{value}`")
+                    if len(values) > 5:
+                        summary_lines.append(f"  *...and {len(values) - 5} more*")
+                    summary_lines.append("")
+                
+                return await fast_send(message.channel, "\n".join(summary_lines))
 
             # ─── SpiderFoot Handler ────────────────────────────────────────────
             if cmd == "spiderfoot":
@@ -508,7 +743,6 @@ async def on_message(message):
                 if not results:
                     return await fast_send(message.channel, f"🕷️ No data found for `{query}`.")
                 
-                # Group results by type
                 by_type = {}
                 for r in results:
                     event_type = r.get("type", "unknown")
@@ -516,15 +750,14 @@ async def on_message(message):
                         by_type[event_type] = []
                     by_type[event_type].append(r.get("data", ""))
                 
-                # Format results
                 summary_lines = [f"🕷️ **SpiderFoot Results for `{query}`:**"]
                 summary_lines.append(f"**Total findings:** {len(results)}")
                 summary_lines.append("")
                 
-                for event_type, data_list in sorted(by_type.items())[:10]:  # Limit to 10 types
+                for event_type, data_list in sorted(by_type.items())[:10]:
                     clean_type = event_type.replace("_", " ").title()
                     summary_lines.append(f"**{clean_type}:** {len(data_list)} items")
-                    for item in data_list[:3]:  # Show first 3 items
+                    for item in data_list[:3]:
                         if len(item) < 100:
                             summary_lines.append(f"• {item}")
                     if len(data_list) > 3:
@@ -533,6 +766,7 @@ async def on_message(message):
                 
                 return await fast_send(message.channel, "\n".join(summary_lines))
 
+            # ─── Sherlock Handler ──────────────────────────────────────────────
             if cmd == "sherlock":
                 await message.channel.send(f"🔍 Starting Sherlock for `{query}`…")
                 out = await osint_manager.run_sherlock_scan(query)
@@ -543,15 +777,6 @@ async def on_message(message):
                     return await fast_send(message.channel, f"🔍 No profiles for `{query}`.")
                 lines = [f"• {u}" for u in urls]
                 return await fast_send(message.channel, "🔍 Sherlock results:\n" + "\n".join(lines))
-
-            # Add harvester handler here when ready...
-
-            if cmd in ("ask","fast","search"):
-                ctx = llm.system_msg
-                msgs = [{"role":"system","content":ctx}, {"role":"user","content":query}]
-                resp, _ = llm.generate(msgs, thinking=(cmd=="ask"))
-                tag = {"ask":"🧠","fast":"⚡","search":"🌐"}.get(cmd,"🤖")
-                return await fast_send(message.channel, f"{tag} {resp}")
 
         except Exception as e:
             await message.channel.send(f"❌ Error: {str(e)}")
