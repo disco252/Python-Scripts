@@ -67,3 +67,22 @@ OSINTbot.py is another iteration of the discord bot, except it has a lot more OS
 
 
 It can read books now, too!
+
+=============================================================================================================================================================
+osint.py combines 6 different search tools for username, domain, and phone number searches. <br>
+
+1. Install Python 3.9+<br>
+2. mkdir OSINT / cd OSINT<br>
+3.  pip install maigret<br>
+    pip install sherlock-project<br>
+    pip install theHarvester<br>
+    pip install requests<br>
+4. Clone additional tools:<br>
+  git clone https://github.com/WebBreacher/WhatsMyName-Python.git<br>
+  git clone https://github.com/smicallef/spiderfoot.git<br>
+  cd spiderfoot<br>
+  pip install -r requirements.txt<br>
+5. Install PhoneInfoga:<br>
+   Go to: https://github.com/sundowndev/phoneinfoga/releases<br>
+
+<br>After following the steps above, you should have full functionality for Username seraches, domain/email searches, and phone number searches. You may also create a .txt file for searching for batches at a single time. Ex: "python osint.py -f batchfile.txt -t username"
