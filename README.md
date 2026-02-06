@@ -69,7 +69,7 @@ OSINTbot.py is another iteration of the discord bot, except it has a lot more OS
 It can read books now, too!
 
 =============================================================================================================================================================<br>
-osint.py combines 6 different search tools for username, domain, and phone number searches. <br>
+osint.py combines 6 different search tools for username, domain, and phone number searches. Please keep in mind this aggregates publicly available information, use responsibly. This was made to help identify spam.<br>
 
 1. Install Python 3.9+<br>
 2. mkdir OSINT / cd OSINT<br>
